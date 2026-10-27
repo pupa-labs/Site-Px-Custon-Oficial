@@ -464,19 +464,25 @@ export const PaymentSettingsView: React.FC<PaymentSettingsViewProps> = ({
                         />
                       </div>
 
-                      <div className="bg-[#141414] border border-[#222] p-3 rounded-xl flex items-center justify-between opacity-65">
+                                            <div className="bg-[#181818] border border-[#262626] p-3 rounded-xl flex items-center justify-between">
                         <div>
-                          <span className="font-bold text-zinc-400 block">Cartão de Crédito</span>
-                          <span className="text-[10px] text-amber-400">Bloqueado (Em Homologação)</span>
+                          <span className="font-bold text-white block">Cartão de Crédito</span>
+                          <span className="text-[10px] text-blue-400">Processamento via Mercado Pago API</span>
                         </div>
                         <input
                           type="checkbox"
-                          disabled={true}
-                          checked={false}
-                          readOnly
-                          className="w-4 h-4 accent-zinc-600 cursor-not-allowed"
+                          disabled={isLoadingConfig || isSaving}
+                          checked={config.credit_card_enabled}
+                          onChange={(e) =>
+                            setConfig({
+                              ...config,
+                              credit_card_enabled: e.target.checked,
+                            })
+                          }
+                          className="w-4 h-4 accent-[#FF1A2D]"
                         />
                       </div>
+
 
                       <div className="bg-[#141414] border border-[#222] p-3 rounded-xl flex items-center justify-between opacity-65">
                         <div>
