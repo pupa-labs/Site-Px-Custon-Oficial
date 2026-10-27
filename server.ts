@@ -107,14 +107,36 @@ const requireAuth = async (req: AuthenticatedRequest, res: Response, next: NextF
 
     // Consultar papel real verificado na tabela oficial do banco (public.profiles)
     // NUNCA confiar em metadados arbitrários (user_metadata) enviados pelo cliente no cadastro
-    const { data: profile } = await supabaseAdmin
+    const { data: profile, error: profileError } = await supabaseAdmin
       .from('profiles')
       .select('role')
       .eq('id', user.id)
       .maybeSingle();
 
-    req.userRole = profile?.role || 'USER';
-    next();
+    if (profileError) {
+      console.error('[PX CUSTON Auth] Erro ao consultar perfil em public.profiles:', profileError.message);
+      return res.status(503).json({
+        error: 'Falha ao verificar o perfil de acesso no banco de dados.',
+        code: 'PROFILE_LOOKUP_FAILED',
+      });
+    }
+
+    if (!profile) {
+      return res.status(403).json({
+        error: 'Acesso negado: Perfil de usuário não encontrado na plataforma.',
+        code: 'PROFILE_NOT_FOUND',
+      });
+    }
+
+    if (!isValidUserRole(profile.role)) {
+      return res.status(403).json({
+        error: 'Acesso negado: Papel de usuário inválido ou não autorizado.',
+        code: 'INVALID_USER_ROLE',
+      });
+    }
+
+    req.userRole = profile.role;
+    return next();
   } catch (err: any) {
     return res.status(500).json({ error: 'Falha na verificação de identidade no servidor.' });
   }
@@ -664,11 +686,17 @@ app.post('/api/admin/init-super-admin', async (req: Request, res: Response) => {
   isInitAdminInProgress = true;
 
   try {
-    const cleanEmail = email.toLowerCase().trim();
+    const cleanEmail = String(email).toLowerCase().trim();
 
     // Consultar o usuário e perfil antes da operação para conhecer o estado prévio (evita rebaixamento cego)
     const { data: usersData, error: userListError } = await supabaseAdmin.auth.admin.listUsers();
-    if (userListError) throw userListError;
+    if (userListError) {
+      console.error('[PX CUSTON Admin Init] Erro ao listar usuários no Supabase Auth:', userListError.message);
+      return res.status(503).json({
+        error: 'Falha ao consultar usuários no serviço de autenticação.',
+        code: 'AUTH_LIST_USERS_FAILED',
+      });
+    }
 
     const authUser = usersData?.users?.find((u) => u.email?.toLowerCase() === cleanEmail);
     if (!authUser) {
@@ -677,109 +705,152 @@ app.post('/api/admin/init-super-admin', async (req: Request, res: Response) => {
       });
     }
 
-    const { data: existingProfile } = await supabaseAdmin
+    const { data: existingProfile, error: existingProfileError } = await supabaseAdmin
       .from('profiles')
       .select('id, role')
       .eq('id', authUser.id)
       .maybeSingle();
 
-    const previousRole = existingProfile?.role || authUser.user_metadata?.role || 'USER';
-
-    // 2. Proteção atômica via Stored Procedure do banco (PostgreSQL transactional)
-    try {
-      const { data: rpcResult, error: rpcError } = await supabaseAdmin.rpc('promote_first_super_admin', {
-        target_email: cleanEmail,
-      });
-
-      if (!rpcError && rpcResult) {
-        // Sincronizar metadata no Auth com tratamento explícito de falha
-        const { error: authUpdateError } = await supabaseAdmin.auth.admin.updateUserById(authUser.id, {
-          user_metadata: { ...(authUser.user_metadata || {}), role: 'SUPER_ADMIN' },
-        });
-
-        if (authUpdateError) {
-          // Reversão segura e localizada: restaurar o perfil para previousRole para não deixar estado indeterminado
-          await supabaseAdmin
-            .from('profiles')
-            .update({ role: previousRole, updated_at: new Date().toISOString() })
-            .eq('id', authUser.id);
-
-          return res.status(502).json({
-            error: 'Falha na sincronização com Supabase Auth: os metadados de autenticação não puderam ser atualizados. A operação foi cancelada e o perfil revertido para o estado anterior para garantir a consistência.',
-            details: authUpdateError.message,
-          });
-        }
-
-        return res.json({
-          success: true,
-          message: 'Primeiro SUPER_ADMIN oficial da PX CUSTON promovido com sucesso!',
-          email: cleanEmail,
-          role: 'SUPER_ADMIN',
-        });
-      }
-
-      if (rpcError) {
-        if (rpcError.message?.includes('Já existe um SUPER_ADMIN') || rpcError.message?.includes('Ação bloqueada')) {
-          return res.status(403).json({
-            error: 'Ação bloqueada: Já existe um SUPER_ADMIN registrado no sistema. Novas permissões devem ser realizadas pelo painel administrativo autenticado.',
-          });
-        }
-        if (rpcError.message?.includes('não possui perfil cadastrado') || rpcError.message?.includes('Usuário não encontrado')) {
-          return res.status(404).json({
-            error: 'Usuário com o e-mail informado não possui perfil cadastrado na plataforma.',
-          });
-        }
-      }
-    } catch {
-      // Falha ao invocar RPC, prosseguir para fallback com compensação transacional
-    }
-
-    // 3. Fallback atômico no backend com verificação estrita e reversão compensatória
-    // A. Verificar se já existe algum SUPER_ADMIN na tabela profiles
-    const { data: existingAdmins, error: adminCheckError } = await supabaseAdmin
-      .from('profiles')
-      .select('id, email')
-      .eq('role', 'SUPER_ADMIN');
-
-    if (adminCheckError) {
-      return res.status(500).json({ error: 'Falha ao verificar administradores existentes no banco de dados.' });
-    }
-
-    if (existingAdmins && existingAdmins.length > 0) {
-      return res.status(403).json({
-        error: 'Ação bloqueada: Já existe um SUPER_ADMIN registrado no sistema. Novas permissões devem ser realizadas pelo painel administrativo autenticado.',
+    if (existingProfileError) {
+      console.error('[PX CUSTON Admin Init] Erro ao consultar perfil prévio em public.profiles:', existingProfileError.message);
+      return res.status(503).json({
+        error: 'Falha ao consultar o perfil do usuário no banco de dados.',
+        code: 'PROFILE_LOOKUP_FAILED',
       });
     }
 
-    const prevMetadata = { ...(authUser.user_metadata || {}) };
+    if (!existingProfile || !isValidUserRole(existingProfile.role)) {
+      return res.status(404).json({
+        error: 'Usuário com o e-mail informado não possui perfil válido cadastrado na plataforma.',
+        code: 'PROFILE_NOT_FOUND',
+      });
+    }
 
-    // B. Atualizar metadata no Auth primeiro com verificação explícita de erro
-    const { error: authError } = await supabaseAdmin.auth.admin.updateUserById(authUser.id, {
-      user_metadata: { ...prevMetadata, role: 'SUPER_ADMIN' },
+    const previousRole = existingProfile.role;
+
+    // 2. Promoção exclusivamente via Stored Procedure oficial do banco (promote_first_super_admin)
+    // Sem fallback de atualização direta em public.profiles
+    const { data: rpcResult, error: rpcError } = await supabaseAdmin.rpc('promote_first_super_admin', {
+      target_email: cleanEmail,
     });
 
-    if (authError) {
+    if (rpcError) {
+      const msg = rpcError.message || '';
+      if (msg.includes('Já existe um SUPER_ADMIN') || msg.includes('Ação bloqueada')) {
+        return res.status(403).json({
+          error: 'Ação bloqueada: Já existe um SUPER_ADMIN registrado no sistema. Novas permissões devem ser realizadas pelo painel administrativo autenticado.',
+        });
+      }
+      if (msg.includes('não possui perfil cadastrado') || msg.includes('Usuário não encontrado')) {
+        return res.status(404).json({
+          error: 'Usuário com o e-mail informado não possui perfil cadastrado na plataforma.',
+        });
+      }
+      console.error('[PX CUSTON Admin Init] Erro na execução da RPC promote_first_super_admin:', msg);
       return res.status(500).json({
-        error: `Falha ao atualizar metadados de autenticação do usuário no Supabase Auth: ${authError.message}`,
+        error: 'Falha ao executar a procedure oficial promote_first_super_admin no banco de dados.',
+        code: 'RPC_EXECUTION_FAILED',
       });
     }
 
-    // C. Atualizar role em public.profiles com verificação explícita de erro
-    const { data: updatedProfile, error: profileUpdateError } = await supabaseAdmin
-      .from('profiles')
-      .update({ role: 'SUPER_ADMIN', updated_at: new Date().toISOString() })
-      .eq('id', authUser.id)
-      .select();
+    const isRpcExplicitlyFailed =
+      rpcResult === null ||
+      rpcResult === undefined ||
+      rpcResult === false ||
+      (typeof rpcResult === 'object' &&
+        !Array.isArray(rpcResult) &&
+        (rpcResult as Record<string, unknown>).success === false);
 
-    if (profileUpdateError || !updatedProfile || updatedProfile.length === 0) {
-      // Compensação transacional (Rollback): Reverter o Auth metadata para evitar inconsistência
-      await supabaseAdmin.auth.admin.updateUserById(authUser.id, {
-        user_metadata: { ...prevMetadata, role: previousRole },
-      });
-
+    if (isRpcExplicitlyFailed) {
+      console.error('[PX CUSTON Admin Init] Resultado sem confirmação de sucesso da RPC promote_first_super_admin.');
       return res.status(500).json({
-        error: 'Falha ao persistir papel SUPER_ADMIN na tabela profiles. Os metadados no Auth foram revertidos para manter a consistência do sistema.',
-        details: profileUpdateError?.message || 'Nenhum registro atualizado.',
+        error: 'A procedure promote_first_super_admin não confirmou a promoção do usuário. Operação abortada por segurança.',
+        code: 'RPC_UNEXPECTED_RESULT',
+      });
+    }
+
+    // 3. Confirmar explicitamente no banco que o perfil está como SUPER_ADMIN após a RPC
+    const { data: verifiedProfile, error: verifyProfileError } = await supabaseAdmin
+      .from('profiles')
+      .select('id, role')
+      .eq('id', authUser.id)
+      .maybeSingle();
+
+    if (verifyProfileError || !verifiedProfile || verifiedProfile.role !== 'SUPER_ADMIN') {
+      console.error(
+        '[PX CUSTON Admin Init] Verificação pós-RPC não confirmou papel SUPER_ADMIN em public.profiles:',
+        verifyProfileError?.message || verifiedProfile?.role || 'perfil ausente'
+      );
+      return res.status(500).json({
+        error: 'Não foi possível confirmar a promoção para SUPER_ADMIN em public.profiles após a execução da procedure.',
+        code: 'PROMOTION_VERIFICATION_FAILED',
+      });
+    }
+
+    // 4. Sincronizar metadados no Supabase Auth preservando campos existentes
+    const existingUserMetadata =
+      authUser.user_metadata &&
+      typeof authUser.user_metadata === 'object' &&
+      !Array.isArray(authUser.user_metadata)
+        ? { ...authUser.user_metadata }
+        : {};
+    const existingAppMetadata =
+      authUser.app_metadata &&
+      typeof authUser.app_metadata === 'object' &&
+      !Array.isArray(authUser.app_metadata)
+        ? { ...authUser.app_metadata }
+        : {};
+
+    const { error: authUpdateError } = await supabaseAdmin.auth.admin.updateUserById(authUser.id, {
+      user_metadata: mergeAuthUserMetadata(existingUserMetadata, 'SUPER_ADMIN'),
+      app_metadata: mergeAuthUserMetadata(existingAppMetadata, 'SUPER_ADMIN'),
+    });
+
+    if (authUpdateError) {
+      // Reversão compensatória verificada: restaurar o perfil para previousRole apenas se ainda for SUPER_ADMIN
+      let rollbackConfirmed = false;
+      let rollbackErrorMessage: string | null = null;
+
+      try {
+        const { data: rolledBackRows, error: rollbackError } = await supabaseAdmin
+          .from('profiles')
+          .update({ role: previousRole, updated_at: new Date().toISOString() })
+          .eq('id', authUser.id)
+          .eq('role', 'SUPER_ADMIN')
+          .select('id, role');
+
+        if (rollbackError) {
+          rollbackErrorMessage = rollbackError.message;
+        } else if (Array.isArray(rolledBackRows) && rolledBackRows.length === 1) {
+          rollbackConfirmed = true;
+        } else {
+          rollbackErrorMessage = 'Nenhuma linha foi revertida em public.profiles.';
+        }
+      } catch (rbEx: any) {
+        rollbackErrorMessage = rbEx?.message || 'Exceção ao executar rollback em public.profiles.';
+      }
+
+      if (!rollbackConfirmed) {
+        console.error(
+          '[PX CUSTON Admin Init] ALERTA CRÍTICO: Falha ao sincronizar Supabase Auth e falha ao confirmar reversão em public.profiles:',
+          { authError: authUpdateError.message, rollbackError: rollbackErrorMessage }
+        );
+        return res.status(500).json({
+          error:
+            'Falha crítica de consistência: Os metadados no Supabase Auth não puderam ser atualizados e a reversão automática em public.profiles não pôde ser confirmada.',
+          details: authUpdateError.message,
+          rollback_error: rollbackErrorMessage,
+          code: 'AUTH_SYNC_AND_ROLLBACK_FAILED',
+          rolledBack: false,
+        });
+      }
+
+      return res.status(502).json({
+        error:
+          'Falha na sincronização com Supabase Auth: os metadados de autenticação não puderam ser atualizados. A operação foi cancelada e o perfil revertido confirmadamente para o estado anterior.',
+        details: authUpdateError.message,
+        code: 'AUTH_METADATA_SYNC_FAILED',
+        rolledBack: true,
       });
     }
 
@@ -787,9 +858,11 @@ app.post('/api/admin/init-super-admin', async (req: Request, res: Response) => {
       success: true,
       message: 'Primeiro SUPER_ADMIN oficial da PX CUSTON promovido com sucesso!',
       user_id: authUser.id,
+      email: cleanEmail,
       role: 'SUPER_ADMIN',
     });
   } catch (err: any) {
+    console.error('[PX CUSTON Admin Init] Exceção ao processar inicialização administrativa:', err?.message || err);
     return res.status(500).json({ error: 'Falha interna ao processar inicialização administrativa.' });
   } finally {
     // Liberar o mutex
