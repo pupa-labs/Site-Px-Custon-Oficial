@@ -1401,4 +1401,122 @@ export async function createOrRecoverMercadoPagoPixPayment(params: {
     },
   };
 }
+export interface MercadoPagoCreditCardOrderInput {
+  id: string;
+  user_id: string;
+  total: number;
+  buyer: {
+    name: string;
+    email: string;
+    cpf?: string;
+  };
+}
+
+export interface MercadoPagoCreditCardChargeResult {
+  ok: boolean;
+  statusCode: number;
+  code?: string;
+  error?: string;
+  payment?: {
+    id: string;
+    status: 'pending' | 'in_process' | 'approved' | 'rejected' | 'cancelled';
+    status_detail: string;
+  };
+}
+
+/**
+ * Processa um pagamento via Cartão de Crédito na API oficial do Mercado Pago (/v1/payments).
+ */
+export async function createCreditCardPayment(params: {
+  order: MercadoPagoCreditCardOrderInput;
+  cardToken: string;
+  installments: number;
+  paymentMethodId: string;
+  issuerId?: string;
+  mpAccessToken?: string;
+  fetchImpl?: typeof fetch;
+  timeoutMs?: number;
+}): Promise<MercadoPagoCreditCardChargeResult> {
+  const { order, cardToken, installments, paymentMethodId, issuerId, timeoutMs = MP_DEFAULT_TIMEOUT_MS } = params;
+  const fetchFn = params.fetchImpl || fetch;
+  const mpAccessToken = (params.mpAccessToken ?? process.env.MP_ACCESS_TOKEN ?? '').trim();
+
+  if (!isTokenConfigured(mpAccessToken)) {
+    return {
+      ok: false,
+      statusCode: 503,
+      code: 'MP_GATEWAY_NOT_CONFIGURED',
+      error: 'Serviço de cartão temporariamente indisponível: MP_ACCESS_TOKEN não configurado.',
+    };
+  }
+
+  const expectedAmount = Number(Number(order.total).toFixed(2));
+  const rawBuyerCpf = String(order.buyer?.cpf || '').trim();
+  const taxId = sanitizeTaxId(rawBuyerCpf);
+  const { firstName, lastName } = splitBuyerName(order.buyer?.name || 'Cliente PX');
+  const payerEmail = order.buyer?.email && order.buyer.email.includes('@')
+    ? order.buyer.email.trim().toLowerCase()
+    : `cliente.${order.id.slice(0, 8)}@pxcuston.com.br`;
+
+  const payload = {
+    transaction_amount: expectedAmount,
+    token: cardToken,
+    description: `PX CUSTON — Pedido ${order.id.slice(0, 8)}`,
+    installments: Number(installments) || 1,
+    payment_method_id: paymentMethodId,
+    issuer_id: issuerId ? Number(issuerId) : undefined,
+    external_reference: order.id,
+    payer: {
+      email: payerEmail,
+      first_name: firstName,
+      last_name: lastName,
+      ...(taxId ? { identification: taxId } : {}),
+    },
+  };
+
+  try {
+    const response = await fetchFn('https://api.mercadopago.com/v1/payments', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${mpAccessToken}`,
+        'Content-Type': 'application/json',
+        'X-Idempotency-Key': `cc-order-${order.id}`,
+      },
+      body: JSON.stringify(payload),
+      signal: createMpTimeoutSignal(timeoutMs),
+    });
+
+    const rawText = await response.text();
+    const data = rawText ? JSON.parse(rawText) : null;
+
+    if (!response.ok || !data) {
+      const errorMsg = data?.cause?.[0]?.description || data?.message || 'Erro ao processar cartão de crédito no Mercado Pago.';
+      return {
+        ok: false,
+        statusCode: response.status || 502,
+        code: data?.error || 'CC_PAYMENT_REJECTED',
+        error: errorMsg,
+      };
+    }
+
+    const internalStatus = mapMercadoPagoStatusToInternal(data.status);
+
+    return {
+      ok: true,
+      statusCode: 200,
+      payment: {
+        id: String(data.id),
+        status: internalStatus,
+        status_detail: String(data.status_detail || ''),
+      },
+    };
+  } catch (err: any) {
+    return {
+      ok: false,
+      statusCode: 502,
+      code: 'CC_GATEWAY_TIMEOUT',
+      error: 'Exceção de rede ou timeout ao comunicar com o gateway de cartão de crédito.',
+    };
+  }
+}
 
