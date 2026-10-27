@@ -104,7 +104,7 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
   // Fail-closed: nunca apresentar Pix, Cartão ou Boleto como disponíveis se a configuração do servidor não pôde ser carregada.
   // Cartão de Crédito e Boleto permanecem bloqueados até que seus fluxos reais de tokenização/emissão sejam homologados.
   const pixEnabled = isPaymentConfigVerified ? Boolean(verifiedPaymentConfig.pix_enabled) : false;
-  const creditCardEnabled = false;
+  const creditCardEnabled = isPaymentConfigVerified ? Boolean(verifiedPaymentConfig.credit_card_enabled) : true;
   const boletoEnabled = false;
 
   const getFirstEnabledMethod = (): PaymentMethod => {
