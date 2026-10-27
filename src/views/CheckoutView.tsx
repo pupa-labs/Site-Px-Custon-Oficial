@@ -790,31 +790,85 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
                 </div>
               )}
 
-              {/* Option 2: Cartão de Crédito (Bloqueado até implementação do fluxo real) */}
-              {isPaymentConfigVerified && (
-                <div
-                  aria-disabled="true"
-                  className="opacity-60 cursor-not-allowed p-4 rounded-2xl border bg-[#141414] border-[#222] flex items-center justify-between select-none"
-                >
-                  <div className="flex items-center gap-3">
-                    <div className="w-5 h-5 rounded-full border border-[#333] flex items-center justify-center bg-[#1a1a1a]">
-                      <Lock className="w-2.5 h-2.5 text-zinc-500" />
-                    </div>
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs font-bold text-zinc-400 uppercase">Cartão de Crédito</span>
-                        <span className="text-[10px] bg-zinc-800 text-zinc-400 font-semibold px-2 py-0.5 rounded-full border border-zinc-700">
-                          Indisponível (Em Homologação)
-                        </span>
+                            {/* Option 2: Cartão de Crédito */}
+              {creditCardEnabled && (
+                <div className="space-y-3">
+                  <div
+                    onClick={() => setSelectedMethod('credit_card')}
+                    className={`cursor-pointer p-4 rounded-2xl border transition flex items-center justify-between ${
+                      selectedMethod === 'credit_card'
+                        ? 'bg-[#181818] border-[#FF1A2D] shadow-[0_0_15px_rgba(255,26,45,0.2)]'
+                        : 'bg-[#151515] border-[#262626] hover:border-[#383838]'
+                    }`}
+                  >
+                    <div className="flex items-center gap-3">
+                      <div
+                        className={`w-5 h-5 rounded-full border flex items-center justify-center ${
+                          selectedMethod === 'credit_card'
+                            ? 'border-[#FF1A2D] bg-[#FF1A2D]'
+                            : 'border-[#444]'
+                        }`}
+                      >
+                        {selectedMethod === 'credit_card' && <div className="w-2 h-2 rounded-full bg-white" />}
                       </div>
-                      <p className="text-[11px] text-zinc-500 mt-0.5">
-                        Temporariamente bloqueado. Utilize o pagamento imediato via Pix.
-                      </p>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-bold text-white uppercase">Cartão de Crédito</span>
+                          <span className="text-[10px] bg-blue-500/20 text-blue-400 font-bold px-2 py-0.5 rounded-full border border-blue-500/30">
+                            Aprovação Imediata
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-zinc-400 mt-0.5">
+                          Pague com cartão de crédito à vista ou parcelado
+                        </p>
+                      </div>
                     </div>
+                    <CreditCard className="w-5 h-5 text-blue-400" />
                   </div>
-                  <CreditCard className="w-5 h-5 text-zinc-600" />
+
+                  {/* Formulário do Cartão (Exibido apenas quando selecionado) */}
+                  {selectedMethod === 'credit_card' && (
+                    <div className="bg-[#181818] border border-[#2a2a2a] p-4 rounded-2xl space-y-3 mt-2">
+                      <div>
+                        <label className="text-[10px] text-zinc-400 uppercase font-semibold block mb-1">
+                          Número do Cartão
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="0000 0000 0000 0000"
+                          maxLength={19}
+                          className="w-full bg-[#111] border border-[#333] rounded-xl px-3 py-2 text-xs text-white placeholder:text-zinc-600 font-mono"
+                        />
+                      </div>
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="text-[10px] text-zinc-400 uppercase font-semibold block mb-1">
+                            Validade (MM/AA)
+                          </label>
+                          <input
+                            type="text"
+                            placeholder="MM/AA"
+                            maxLength={5}
+                            className="w-full bg-[#111] border border-[#333] rounded-xl px-3 py-2 text-xs text-white placeholder:text-zinc-600 font-mono"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-[10px] text-zinc-400 uppercase font-semibold block mb-1">
+                            CVV (Segurança)
+                          </label>
+                          <input
+                            type="password"
+                            placeholder="123"
+                            maxLength={4}
+                            className="w-full bg-[#111] border border-[#333] rounded-xl px-3 py-2 text-xs text-white placeholder:text-zinc-600 font-mono"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
+
 
               {/* Option 3: Boleto Bancário (Bloqueado até implementação do fluxo real) */}
               {isPaymentConfigVerified && (
