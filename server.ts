@@ -44,6 +44,7 @@ import {
   createMpTimeoutSignal,
   isValidBrazilianCpf,
   normalizeCpfDigits,
+  createCreditCardPayment,
 } from './src/lib/mercadoPagoGateway';
 
 dotenv.config();
@@ -3013,3 +3014,72 @@ if (process.env.PX_SKIP_SERVER_AUTOSTART !== 'true') {
     process.exit(1);
   });
 }
+// ==========================================
+// ROTA DE PAGAMENTO: CARTÃO DE CRÉDITO
+// ==========================================
+app.post('/api/payments/process-card', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  const { order_id, card_token, installments, payment_method_id, issuer_id, buyer } = req.body;
+
+  if (!order_id || !card_token || !payment_method_id) {
+    return res.status(400).json({ error: 'Dados do cartão incompletos ou ID do pedido ausente.' });
+  }
+
+  const { data: order, error: orderErr } = await supabaseAdmin
+    .from('orders')
+    .select('*')
+    .eq('id', order_id)
+    .maybeSingle();
+
+  if (orderErr || !order) {
+    return res.status(404).json({ error: 'Pedido não encontrado para processamento.' });
+  }
+
+  if (order.payment_status === 'approved') {
+    return res.status(400).json({ error: 'Este pedido já foi pago anteriormente.' });
+  }
+
+  const result = await createCreditCardPayment({
+    order: {
+      id: order.id,
+      user_id: order.user_id,
+      total: Number(order.total),
+      buyer: {
+        name: buyer?.name || req.user.user_metadata?.full_name || 'Cliente PX',
+        email: buyer?.email || req.user.email || '',
+        cpf: buyer?.cpf || '',
+      },
+    },
+    cardToken: card_token,
+    installments: Number(installments) || 1,
+    paymentMethodId: payment_method_id,
+    issuerId: issuerId ? String(issuerId) : undefined,
+    mpAccessToken: process.env.MP_ACCESS_TOKEN,
+  });
+
+  if (!result.ok || !result.payment) {
+    return res.status(result.statusCode).json({ 
+      error: result.error || 'Falha ao processar o cartão de crédito.', 
+      code: result.code 
+    });
+  }
+
+  if (result.payment.status === 'approved') {
+    const { error: rpcErr } = await supabaseAdmin.rpc('confirm_order_and_issue_tickets', {
+      p_order_id: order.id,
+      p_mercado_pago_id: result.payment.id,
+    });
+
+    if (rpcErr) {
+      console.error(`[PX CUSTON] Erro ao emitir ingressos após aprovação do cartão para o pedido ${order.id}:`, rpcErr);
+    }
+  }
+
+  return res.json({
+    success: true,
+    status: result.payment.status,
+    status_detail: result.payment.status_detail,
+    order_id: order.id,
+    payment_id: result.payment.id,
+  });
+});
+    
