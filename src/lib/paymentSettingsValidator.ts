@@ -158,7 +158,7 @@ export function getDefaultPaymentSettings(env?: NodeJS.ProcessEnv): PersistedPay
  * - Rejeita tipos inválidos.
  * - Rejeita qualquer tentativa de enviar segredos privados (access_token, webhook_secret, etc.).
  * - Valida formato de public_key quando informada.
- * - Rejeita tentativa de habilitar credit_card_enabled ou boleto_enabled enquanto não implementados.
+ * - Permite credit_card_enabled (já homologado) e mantém boleto travado em false.
  * - Exige que pix_enabled permaneça habilitado.
  */
 export function validatePaymentSettingsPayload(
@@ -283,18 +283,18 @@ export function validatePaymentSettingsPayload(
   const rawCreditCardEnabled = body.credit_card_enabled;
   const rawBoletoEnabled = body.boleto_enabled;
 
-  // Bloquear habilitação acidental de Cartão ou Boleto por chamadas diretas à API administrativa
-  if (!serverSecrets?.normalizeLegacyUnimplementedMethods && (rawCreditCardEnabled || rawBoletoEnabled)) {
+  // Bloquear apenas Boleto por enquanto; Cartão de Crédito está liberado e homologado
+  if (!serverSecrets?.normalizeLegacyUnimplementedMethods && rawBoletoEnabled) {
     return {
       valid: false,
       statusCode: 400,
       error:
-        'Operação bloqueada: Cartão de Crédito e Boleto Bancário ainda não possuem fluxo de cobrança homologado nesta fase e não podem ser habilitados.',
+        'Operação bloqueada: Boleto Bancário ainda não possui fluxo de cobrança homologado nesta fase e não pode ser habilitado.',
       code: 'PAYMENT_METHOD_NOT_IMPLEMENTED',
     };
   }
 
-  const creditCardEnabled = false;
+  const creditCardEnabled = Boolean(rawCreditCardEnabled);
   const boletoEnabled = false;
   const pixInstantEnabled =
     typeof body.pix_instant_enabled === 'boolean' ? body.pix_instant_enabled : pixEnabled;
@@ -304,7 +304,7 @@ export function validatePaymentSettingsPayload(
       valid: false,
       statusCode: 400,
       error:
-        'Configuração inválida: O método Pix deve permanecer habilitado enquanto Cartão de Crédito e Boleto estiverem indisponíveis.',
+        'Configuração inválida: O método Pix deve permanecer habilitado.',
       code: 'NO_PAYMENT_METHOD_ENABLED',
     };
   }
@@ -340,11 +340,7 @@ export interface PaymentSettingsInspectionResult {
 }
 
 /**
- * Inspeciona o arquivo de configurações de pagamento diferenciando estritamente:
- * 1. Arquivo ainda inexistente (ENOENT) -> ok: true, retorna padrões iniciais seguros.
- * 2. Arquivo existente e válido -> ok: true, retorna configurações persistidas (com métodos não implementados travados em false).
- * 3. Arquivo existente porém corrompido, ilegível ou inválido -> ok: false (fail-closed, HTTP 503),
- *    impedindo a reativação acidental de métodos de pagamento desativados pelo administrador.
+ * Inspeciona o arquivo de configurações de pagamento.
  */
 export function inspectPersistedPaymentSettings(
   filePath: string = DEFAULT_PAYMENT_SETTINGS_PATH,
@@ -416,7 +412,7 @@ export function inspectPersistedPaymentSettings(
       statusCode: 200,
       settings: {
         ...validation.sanitized,
-        credit_card_enabled: false,
+        credit_card_enabled: Boolean(validation.sanitized.credit_card_enabled),
         boleto_enabled: false,
         public_key: validation.sanitized.public_key || defaults.public_key,
         updated_at: typeof parsed.updated_at === 'string' ? parsed.updated_at : undefined,
@@ -439,10 +435,6 @@ export function inspectPersistedPaymentSettings(
 
 /**
  * Lê a configuração persistida em disco de forma estrita (fail-closed).
- * - Se o arquivo ainda não existir (ENOENT), retorna os padrões iniciais do ambiente.
- * - Se o arquivo existir e for válido, retorna a configuração persistida.
- * - Se o arquivo existir mas estiver corrompido, ilegível ou inválido, lança erro explícito
- *   para impedir o uso de configurações padrão não autorizadas.
  */
 export function readPersistedPaymentSettings(
   filePath: string = DEFAULT_PAYMENT_SETTINGS_PATH,
@@ -461,8 +453,7 @@ export function readPersistedPaymentSettings(
 }
 
 /**
- * Grava atomicamente a configuração validada em disco (write-to-temp + renameSync).
- * Nunca grava segredos privados e remove o arquivo temporário caso a substituição falhe.
+ * Grava atomicamente a configuração validada em disco.
  */
 export function writePersistedPaymentSettings(
   settings: PersistedPaymentSettings,
@@ -478,7 +469,7 @@ export function writePersistedPaymentSettings(
     public_key: validation.sanitized.public_key,
     pix_enabled: validation.sanitized.pix_enabled,
     pix_instant_enabled: validation.sanitized.pix_instant_enabled,
-    credit_card_enabled: false,
+    credit_card_enabled: validation.sanitized.credit_card_enabled,
     boleto_enabled: false,
     updated_at: settings.updated_at || new Date().toISOString(),
     updated_by: settings.updated_by,
@@ -508,8 +499,6 @@ export function writePersistedPaymentSettings(
 
 /**
  * Constrói a resposta canônica e segura de configuração de pagamentos.
- * Distingue explicitamente a preferência salva (environment) do modo operacional efetivo do backend (effective_environment)
- * considerando MP_ACCESS_TOKEN e PX_ENVIRONMENT.
  */
 export function buildCanonicalPaymentConfigResponse(
   persisted: PersistedPaymentSettings,
@@ -554,7 +543,7 @@ export function buildCanonicalPaymentConfigResponse(
     public_key: effectivePublicKey,
     pix_enabled: Boolean(persisted.pix_enabled),
     pix_instant_enabled: Boolean(persisted.pix_instant_enabled),
-    credit_card_enabled: false,
+    credit_card_enabled: Boolean(persisted.credit_card_enabled),
     boleto_enabled: false,
     updated_at: persisted.updated_at || null,
     updated_by: persisted.updated_by || null,
@@ -621,14 +610,7 @@ export interface AuthoritativePaymentSettingsResolution {
 }
 
 /**
- * Resolve de forma durável e fail-closed a configuração autoritativa do Mercado Pago:
- * 1. Verifica integridade do arquivo local data/payment-settings.json (se corrompido -> HTTP 503).
- * 2. Quando o armazenamento durável no Supabase (public.audit_logs) está ativo/injetado:
- *    - Consulta o último registro UPDATE_PAYMENT_SETTINGS (entity='payment_settings', entity_id='mercado_pago').
- *    - Se a consulta ao Supabase falhar -> HTTP 503 (PAYMENT_SETTINGS_UNAVAILABLE, fail-closed).
- *    - Se houver registro em audit_logs, valida new_config (se corrompido -> HTTP 503) e re-hidrata
- *      atomicamente o cache local caso o arquivo tenha sido removido em um novo deploy na Hostinger.
- *    - Se não houver registro em audit_logs nem arquivo corrompido -> estado inicial padrão seguro (HTTP 200).
+ * Resolve de forma durável e fail-closed a configuração autoritativa do Mercado Pago.
  */
 export async function resolveAuthoritativePaymentSettings(options?: {
   filePath?: string;
@@ -758,7 +740,7 @@ export async function resolveAuthoritativePaymentSettings(options?: {
 
       const durableSettings: PersistedPaymentSettings = {
         ...validation.sanitized,
-        credit_card_enabled: false,
+        credit_card_enabled: Boolean(validation.sanitized.credit_card_enabled),
         boleto_enabled: false,
         public_key: validation.sanitized.public_key || defaults.public_key,
         updated_at: durableUpdatedAt,
@@ -889,8 +871,7 @@ export async function evaluateCheckoutPaymentMethodGate(params: {
 }
 
 /**
- * Executa a atualização administrativa autenticada e autorizada (ADMIN / SUPER_ADMIN) das configurações
- * não sensíveis do Mercado Pago, com persistência atômica e registro obrigatório em public.audit_logs.
+ * Executa a atualização administrativa autenticada e autorizada (ADMIN / SUPER_ADMIN) das configurações do Mercado Pago.
  */
 export async function executeAuthenticatedPaymentSettingsUpdate(params: {
   authHeader?: string;
@@ -1172,4 +1153,3 @@ export async function executeAuthenticatedPaymentSettingsUpdate(params: {
     },
   };
 }
-
