@@ -158,13 +158,13 @@ export const PaymentSettingsView: React.FC<PaymentSettingsViewProps> = ({
 
     setIsSaving(true);
 
-    try {
+        try {
       const result = await savePaymentSettings({
         environment: config.environment,
         public_key: config.public_key,
         pix_enabled: config.pix_enabled,
         pix_instant_enabled: config.pix_enabled,
-        credit_card_enabled: false,
+        credit_card_enabled: config.credit_card_enabled,
         boleto_enabled: false,
       });
 
